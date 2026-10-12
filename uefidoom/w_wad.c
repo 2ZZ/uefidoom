@@ -387,7 +387,6 @@ int W_CheckNumForName (char* name)
     }
 
     // TFB. Not found.
-    printf("W_CheckNumForName: lump not found for name %s\n", name8.s);
     return -1;
 }
 
