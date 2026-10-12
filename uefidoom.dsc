@@ -20,6 +20,8 @@
 [PcdsFixedAtBuild]
   gEfiMdePkgTokenSpaceGuid.PcdDebugPropertyMask|$(DEBUG_PROPERTY_MASK)
   gEfiMdePkgTokenSpaceGuid.PcdDebugPrintErrorLevel|$(DEBUG_PRINT_ERROR_LEVEL)
+  # ShellLib is initialised from DoomEfiMain, once the Shell (or our stand-in) is known
+  gEfiShellPkgTokenSpaceGuid.PcdShellLibAutoInitialize|FALSE
 
 [LibraryClasses]
   #

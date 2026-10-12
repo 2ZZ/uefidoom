@@ -5,7 +5,7 @@
   FILE_GUID                      = 6987936E-ED34-44db-AE97-1FA5E4ED2116
   MODULE_TYPE                    = UEFI_APPLICATION
   VERSION_STRING                 = 1.0
-  ENTRY_POINT                    = ShellCEntryLib
+  ENTRY_POINT                    = DoomEfiMain
 
 #
 # The following information is for reference only and not required by the build tools.
@@ -18,6 +18,7 @@ efi/i_system.c
 efi/i_net.c
 efi/i_sound.c
 efi/i_video.c
+efi/shell_shim.c
 sound/samplerate.c
 sound/src_linear.c
 sound/src_sinc.c
@@ -99,6 +100,12 @@ efi/chkstk.nasm | MSFT
   DevShell
   SerialPortLib
   LibMath
+  ShellLib
+  FileHandleLib
+  DevicePathLib
+  MemoryAllocationLib
+  BaseMemoryLib
+  BaseLib
 
 [Protocols]
   gEfiLoadedImageProtocolGuid
@@ -106,6 +113,13 @@ efi/chkstk.nasm | MSFT
   gEfiSimplePointerProtocolGuid
   gEfiSimpleTextInputExProtocolGuid
   gEfiAudioIoProtocolGuid
+  gEfiShellProtocolGuid
+  gEfiShellParametersProtocolGuid
+  gEfiShellInterfaceGuid
+  gEfiSimpleFileSystemProtocolGuid
+
+[FixedPcd]
+  gEfiShellPkgTokenSpaceGuid.PcdShellLibAutoInitialize
 
 [BuildOptions]
     *:*_*_*_CC_FLAGS      = -DNORMALUNIX
