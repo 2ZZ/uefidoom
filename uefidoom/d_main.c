@@ -987,6 +987,25 @@ void D_DoomMain(void)
 	printf("W_Init: Init WADfiles.\n");
 	W_InitMultipleFiles(wadfiles);
 
+	// The IWAD is picked by file name, so correct the game mode from what
+	// it actually contains (e.g. a shareware doom1.wad renamed to doom.wad).
+	if (gamemode == registered || gamemode == retail)
+	{
+		if (W_CheckNumForName("E2M1") < 0)
+		{
+			printf("IWAD has no episode 2; running as shareware.\n");
+			gamemode = shareware;
+		}
+		else if (W_CheckNumForName("E4M1") >= 0)
+		{
+			gamemode = retail;
+		}
+		else
+		{
+			gamemode = registered;
+		}
+	}
+
 	// Check for -file in shareware
 	if (modifiedgame)
 	{
