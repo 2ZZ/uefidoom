@@ -205,7 +205,7 @@ void R_InitSpriteDefs (char** namelist)
     //  noting the highest frame letter.
     // Just compare 4 characters as ints
    // printf("Number of sprites:%d\n",numsprites);
-    for (i=0 ; i<(numsprites - 3) ; i++)
+    for (i=0 ; i<numsprites ; i++)
     {
     //printf("Currently at: %d\n",i);
 	spritename = namelist[i];
