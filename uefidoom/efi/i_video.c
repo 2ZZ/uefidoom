@@ -3,6 +3,7 @@
 #include <d_event.h>
 #include <d_main.h>
 #include <doomdef.h>
+#include <i_system.h>
 #define STB_IMAGE_RESIZE_IMPLEMENTATION 1
 #include "stb_image_resize.h"
 // Efi stuff
@@ -25,7 +26,7 @@ typedef void(*FrameRenderFptr)(void);
 ////////////////////////////////////////////////////////////////////
 
 static EFI_GRAPHICS_OUTPUT_PROTOCOL* gGOP = NULL;
-static EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE* mode = NULL;
+static UINT32 originalMode = 0;
 
 static UINT32 frameLeft = 0;
 static UINT32 frameTop = 0;
@@ -40,7 +41,7 @@ static FrameRenderFptr gRenderFunc = NULL;
 static boolean getInput = true;
 static EFI_KEY_DATA keydata[4096];
 static unsigned int keycounter;
-#define FRAME_SCALE 2
+static UINT32* frameColumnMap = NULL;
 
 static int xlatekey(EFI_INPUT_KEY* efiKey);
 
@@ -158,6 +159,35 @@ static void EnumerateGraphics(void)
 
 ////////////////////////////////////////////////////////////////////
 
+// Fallback frame render, writes straight into the linear frame buffer
+void GopDirectRender(void)
+{
+	EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* info = gGOP->Mode->Info;
+	UINT32* fb = (UINT32*)(UINTN)gGOP->Mode->FrameBufferBase;
+	UINT32 stride = info->PixelsPerScanLine;
+	UINT32 x;
+	UINT32 y;
+
+	for (y = 0; y < frameHeight; ++y)
+	{
+		UINT32* dst = fb + (UINTN)(frameTop + y) * stride + frameLeft;
+		EFI_GRAPHICS_OUTPUT_BLT_PIXEL* src = frameBuffer + (UINTN)y * frameWidth;
+
+		if (info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor)
+		{
+			// Same layout as EFI_GRAPHICS_OUTPUT_BLT_PIXEL
+			memcpy(dst, src, frameWidth * sizeof(*src));
+		}
+		else
+		{
+			for (x = 0; x < frameWidth; ++x)
+			{
+				dst[x] = (UINT32)src[x].Red | ((UINT32)src[x].Green << 8) | ((UINT32)src[x].Blue << 16);
+			}
+		}
+	}
+}
+
 // Default frame render, uses GOP blt 
 void GopBltRender(void)
 {
@@ -172,7 +202,60 @@ void GopBltRender(void)
 
 	if (EFI_ERROR(status))
 	{
-		printf("Blit failed\n");
+		EFI_GRAPHICS_PIXEL_FORMAT format = gGOP->Mode->Info->PixelFormat;
+		if (gGOP->Mode->FrameBufferBase != 0 &&
+			(format == PixelBlueGreenRedReserved8BitPerColor || format == PixelRedGreenBlueReserved8BitPerColor))
+		{
+			// Firmware Blt is broken or unsupported; draw to the frame buffer ourselves
+			gRenderFunc = GopDirectRender;
+			GopDirectRender();
+		}
+		else
+		{
+			I_Error("GOP Blt failed: 0x%x (pixel format %d)\n", status, format);
+		}
+	}
+}
+
+// Keep the current (usually native) mode unless it is too small to be
+// useful, in which case switch to the largest mode available
+static void SelectGraphicsMode(void)
+{
+	UINT32 i;
+	UINT32 best = gGOP->Mode->Mode;
+	UINT64 bestArea = 0;
+
+	if (gGOP->Mode->Info->HorizontalResolution >= SCREENWIDTH * 2 &&
+		gGOP->Mode->Info->VerticalResolution >= SCREENHEIGHT * 2)
+	{
+		return;
+	}
+
+	for (i = 0; i < gGOP->Mode->MaxMode; ++i)
+	{
+		EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* info = NULL;
+		UINTN infoSize = 0;
+
+		if (EFI_ERROR(gGOP->QueryMode(gGOP, i, &infoSize, &info)))
+		{
+			continue;
+		}
+
+		if (info->PixelFormat != PixelBltOnly)
+		{
+			UINT64 area = (UINT64)info->HorizontalResolution * info->VerticalResolution;
+			if (area > bestArea)
+			{
+				bestArea = area;
+				best = i;
+			}
+		}
+		gBS->FreePool(info);
+	}
+
+	if (best != gGOP->Mode->Mode && EFI_ERROR(gGOP->SetMode(gGOP, best)))
+	{
+		printf("GOP mode %d not set; using native console mode\n", best);
 	}
 }
 
@@ -261,16 +344,24 @@ void I_InitGraphics (void)
 			gInputEx->RegisterKeyNotify(gInputEx,&scankeydata,I_ScanKeyNotify,(void**)&ScanNotifHandle);
 		}
 	}*/
-	mode = gGOP->Mode;
-	status = gGOP->SetMode(gGOP, 0);
-	if (EFI_ERROR(status))
-	{
-		printf("GOP mode not set; using native console mode\n");
-	}
+	originalMode = gGOP->Mode->Mode;
+	SelectGraphicsMode();
 	
+	// Fill the screen with a 4:3 frame, as 320x200 was shown on a 4:3 monitor
+	frameHeight = gGOP->Mode->Info->VerticalResolution;
+	frameWidth = frameHeight * 4 / 3;
+	if (frameWidth > gGOP->Mode->Info->HorizontalResolution)
+	{
+		frameWidth = gGOP->Mode->Info->HorizontalResolution;
+		frameHeight = frameWidth * 3 / 4;
+	}
+	if (frameWidth < SCREENWIDTH || frameHeight < SCREENHEIGHT)
+	{
+		I_Error("Display mode %dx%d is too small\n", gGOP->Mode->Info->HorizontalResolution, gGOP->Mode->Info->VerticalResolution);
+		return;
+	}
+
 	// Calculate frame origin in current display mode
-	frameWidth = SCREENWIDTH * FRAME_SCALE;
-	frameHeight = SCREENHEIGHT * FRAME_SCALE;
 	frameLeft = (gGOP->Mode->Info->HorizontalResolution - frameWidth) >> 1;
 	frameTop = (gGOP->Mode->Info->VerticalResolution - frameHeight) >> 1;
 
@@ -286,11 +377,19 @@ void I_InitGraphics (void)
 	}
 
 	frameBuffer = (EFI_GRAPHICS_OUTPUT_BLT_PIXEL*)malloc(sizeof(EFI_GRAPHICS_OUTPUT_BLT_PIXEL) * frameWidth * frameHeight);
-	if (!frameBuffer)
+	frameColumnMap = (UINT32*)malloc(sizeof(UINT32) * frameWidth);
+	if (!frameBuffer || !frameColumnMap)
 	{
 		free(screens[0]);
 		I_Error("Failed to allocate frameBuffer!\n");
 		return;
+	}
+
+	// Source column for each frame column
+	UINT32 x;
+	for (x = 0; x < frameWidth; ++x)
+	{
+		frameColumnMap[x] = x * SCREENWIDTH / frameWidth;
 	}
 	
 	printf("DOOM display %dx%d\n", SCREENWIDTH, SCREENHEIGHT);
@@ -302,34 +401,30 @@ void I_InitGraphics (void)
 
 void MakeFrame (void)
 {
-	UINTN i;
-	UINTN j;
-	UINTN linedest;
+	UINTN y;
+	UINTN x;
+	UINTN srcY;
+	UINTN prevSrcY = (UINTN)-1;
 	// Each pixel in screen buffer is a pallette index
-	byte* srcLine = screens[0];
 	EFI_GRAPHICS_OUTPUT_BLT_PIXEL* dstLine = frameBuffer;
-	for (i = 0; i < SCREENHEIGHT; ++i)
+	for (y = 0; y < frameHeight; ++y, dstLine += frameWidth)
 	{
-		// Convert source screen line into framebuffer pixels
-		EFI_GRAPHICS_OUTPUT_BLT_PIXEL* curLine = dstLine; // Save pointer for later
-		for (j = 0; j < SCREENWIDTH; ++j)
+		srcY = y * SCREENHEIGHT / frameHeight;
+		if (srcY == prevSrcY)
 		{
-			byte pixel = *srcLine++;
-
-			for (linedest = 0; linedest < FRAME_SCALE; linedest++)
-			{
-			*dstLine++ = gPalette[pixel];
-			}
+			// Same source line as the previous frame line; copy it
+			memcpy(dstLine, dstLine - frameWidth, frameWidth * sizeof(*frameBuffer));
+			continue;
 		}
-		for (linedest = 0; linedest < (FRAME_SCALE - 1); linedest++)
+		prevSrcY = srcY;
+
+		// Convert source screen line into framebuffer pixels
+		byte* srcLine = screens[0] + srcY * SCREENWIDTH;
+		for (x = 0; x < frameWidth; ++x)
 		{
-			// Copy this dst line to the next one
-			memcpy(dstLine, curLine, frameWidth * sizeof(*frameBuffer));
-			// Skip next line (copied above)
-			dstLine += frameWidth;
+			dstLine[x] = gPalette[srcLine[frameColumnMap[x]]];
 		}
 	}
-	
 }
 
 void I_FinishUpdate (void)
@@ -340,8 +435,15 @@ void I_FinishUpdate (void)
 
 void I_ShutdownGraphics(void)
 {
-	gGOP->SetMode(gGOP,mode->Mode);
+	if (gGOP == NULL)
+	{
+		// Never initialized (e.g. I_Error before I_InitGraphics)
+		return;
+	}
+
+	gGOP->SetMode(gGOP,originalMode);
 	free(frameBuffer);
+	free(frameColumnMap);
 	free(screens[0]);
 
 	gGOP = NULL;
